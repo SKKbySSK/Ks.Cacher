@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 namespace Ks.Cacher
 {
@@ -60,11 +61,13 @@ namespace Ks.Cacher
                     data = Caches[key];
 
                     if (lockData)
-                        data.Locked = lockData;
+                        data.Lock();
+
+                    return data;
                 }
             }
 
-            data = await CacheAsync(key, factory, lockData);
+            data = await CacheAsync(key, factory, lockData).ConfigureAwait(false);
             return data;
         }
 
@@ -76,36 +79,87 @@ namespace Ks.Cacher
         /// <returns></returns>
         public async Task<CachedData> CacheAsync(string key, CacheFactory factory, bool lockData)
         {
-            CachedData data;
-            using (var fs = AllocateTemporaryFile(factory, out var path))
-            using (var stream = await factory.Factory().ConfigureAwait(false))
+            CachedData data = new CachedData();
+
+            try
             {
-                await stream.CopyToAsync(fs);
-
-                data = new CachedData(path, fs.Length);
-                data.Locked = true;
-
+                CachedData caching = null;
+                Task semaphoreTask = null;
+            
                 lock (Caches)
                 {
                     if (Caches.ContainsKey(key))
                     {
                         var last = Caches[key];
-                        TotalSize -= new FileInfo(last.Path).Length;
-                        TotalCount--;
+                        if (last.CachingSemaphore.Wait(0))
+                        {
+                            File.Delete(last.Path);
+                            TotalSize -= last.Size;
+                            TotalCount--;
+                        }
+                        else
+                        {
+                            caching = last;
+                            semaphoreTask = caching.CachingSemaphore.WaitAsync();
+                        }
                     }
-
-                    TotalSize += fs.Length;
-                    TotalCount++;
-                    Caches[key] = data;
+                    else
+                    {
+                        semaphoreTask = data.CachingSemaphore.WaitAsync();
+                        data.Lock();
+                        Caches.Add(key, data);
+                    }
                 }
 
-                CheckCaches();
+                if (semaphoreTask != null)
+                    await semaphoreTask;
+            
+                if (caching != null)
+                {
+                    caching.CachingSemaphore.Release();
+                    return caching;
+                }
+            
+                using (var fs = AllocateTemporaryFile(factory, out var path))
+                {
+                    await factory.Factory(fs);
                 
-                Cached?.Invoke(this, new CachedEventArgs(data));
-
-                if (!lockData) data.Locked = false;
-
+                    CheckCaches();
+                    
+                    data.Path = path;
+                    data.Size = fs.Length;
+                    
+                    TotalSize += fs.Length;
+                    TotalCount++;
+                }
+            
                 return data;
+            }
+            finally
+            {
+                if (!lockData) data.Unlock();
+                data.CachingSemaphore.Release();
+                Cached?.Invoke(this, new CachedEventArgs(data));
+            }
+        }
+
+        public async Task CopyAsync(CachedData data, string export)
+        {
+            await data.CachingSemaphore.WaitAsync();
+            data.Lock();
+            
+            try
+            {
+                using (var input = await data.CreateStreamAsync())
+                using (FileStream dest = new FileStream(export, FileMode.Open, FileAccess.Write))
+                {
+                    await input.CopyToAsync(dest).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                data.CachingSemaphore.Release();
+                data.Unlock();
             }
         }
 

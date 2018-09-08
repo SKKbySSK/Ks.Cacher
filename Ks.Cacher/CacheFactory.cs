@@ -6,18 +6,18 @@ namespace Ks.Cacher
 {
     public class CacheFactory
     {
-        public CacheFactory(Func<Task<Stream>> factory)
+        public CacheFactory(Func<Stream, Task> factory)
         {
             Factory = factory;
         }
 
-        public CacheFactory(string prefix, string suffix, Func<Task<Stream>> factory) : this(factory)
+        public CacheFactory(string prefix, string suffix, Func<Stream, Task> factory) : this(factory)
         {
             Prefix = prefix;
             Suffix = suffix;
         }
 
-        public Func<Task<Stream>> Factory { get; }
+        public Func<Stream, Task> Factory { get; }
 
         public string Prefix { get; set; } = "cache";
 
