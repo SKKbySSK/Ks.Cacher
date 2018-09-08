@@ -8,21 +8,6 @@ using System.Linq;
 
 namespace Ks.Cacher
 {
-    public class CachedEventArgs : EventArgs
-    {
-        public CachedEventArgs(CachedData data)
-        {
-            Data = data;
-        }
-
-        public CachedData Data { get; }
-    }
-
-    public interface ILogger
-    {
-        void OnExceptionThrown(Exception ex);
-    }
-
     public class FileManager
     {
         private Dictionary<string, CachedData> Caches { get; } = new Dictionary<string, CachedData>();
@@ -149,7 +134,7 @@ namespace Ks.Cacher
                             }
                             break;
                         case CacheMode.Size:
-                            Console.WriteLine("CacheMode.Size is not currently supported");
+                            Console.WriteLine("CacheMode.Size is currently unsupported");
                             break;
                     }
                 }
