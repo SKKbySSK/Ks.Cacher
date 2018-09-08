@@ -17,32 +17,38 @@ namespace Ks.Cacher
 
         public bool Exists => File.Exists(Path);
 
-        public bool Locked { get; private set; } = true;
+        public bool Locked => StreamLock || UserLock;
 
-        public SemaphoreSlim CachingSemaphore { get; } = new SemaphoreSlim(1, 1);
+        private bool UserLock { get; set; }
+
+        internal SemaphoreSlim Semaphore { get; } = new SemaphoreSlim(1, 1);
+
+        internal bool StreamLock { get; set; } = false;
 
         public void Lock()
         {
-            Locked = true;
+            UserLock = true;
         }
 
         public void Unlock()
         {
-            Locked = false;
+            UserLock = false;
         }
 
         public async Task<CachedStream> CreateStreamAsync()
         {
-            await CachingSemaphore.WaitAsync();
+            await Semaphore.WaitAsync();
+
+            StreamLock = true;
             return new CachedStream(this);
         }
     }
 
     public class CachedStream : Stream
     {
-        private FileStream BaseStream { get; }
+        private FileStream BaseStream { get; set; }
         
-        public CachedData Cache { get; }
+        public CachedData Cache { get; private set; }
         
         internal CachedStream(CachedData cache)
         {
@@ -93,9 +99,17 @@ namespace Ks.Cacher
         {
             base.Dispose(disposing);
 
-            if (disposing)
+            if (BaseStream != null)
             {
-                Cache.CachingSemaphore.Release();
+                BaseStream.Dispose();
+                BaseStream = null;
+            }
+
+            if (Cache != null)
+            {
+                Cache.StreamLock = false;
+                Cache.Semaphore.Release();
+                Cache = null;
             }
         }
     }

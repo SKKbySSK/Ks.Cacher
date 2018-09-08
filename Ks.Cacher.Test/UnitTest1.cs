@@ -53,7 +53,7 @@ namespace Ks.Cacher.Test
 
         private static CacheFactory GetFactory(int size)
         {
-            return new CacheFactory(() => Task.FromResult<System.IO.Stream>(new System.IO.MemoryStream(new byte[size])));
+            return new CacheFactory(stream => new System.IO.MemoryStream(new byte[size]).CopyToAsync(stream));
         }
     }
 }

@@ -11,7 +11,11 @@ namespace Ks.Cacher
 {
     public class FileManager
     {
+        private readonly object lockObj = new object();
+
         private Dictionary<string, CachedData> Caches { get; } = new Dictionary<string, CachedData>();
+
+        private Dictionary<string, CachedData> Cachings { get; } = new Dictionary<string, CachedData>();
 
         public event EventHandler<CachedEventArgs> Cached;
 
@@ -54,7 +58,7 @@ namespace Ks.Cacher
         public async Task<CachedData> GetDataAsync(string key, CacheFactory factory, bool lockData)
         {
             CachedData data;
-            lock (Caches)
+            lock (lockObj)
             {
                 if (Caches.ContainsKey(key))
                 {
@@ -84,47 +88,32 @@ namespace Ks.Cacher
             try
             {
                 CachedData caching = null;
-                Task semaphoreTask = null;
             
-                lock (Caches)
+                lock (lockObj)
                 {
-                    if (Caches.ContainsKey(key))
+                    if (Cachings.ContainsKey(key))
                     {
-                        var last = Caches[key];
-                        if (last.CachingSemaphore.Wait(0))
-                        {
-                            File.Delete(last.Path);
-                            TotalSize -= last.Size;
-                            TotalCount--;
-                        }
-                        else
-                        {
-                            caching = last;
-                            semaphoreTask = caching.CachingSemaphore.WaitAsync();
-                        }
+                        caching = Cachings[key];
                     }
                     else
                     {
-                        semaphoreTask = data.CachingSemaphore.WaitAsync();
                         data.Lock();
-                        Caches.Add(key, data);
+                        Cachings.Add(key, data);
                     }
                 }
 
-                if (semaphoreTask != null)
-                    await semaphoreTask;
-            
                 if (caching != null)
                 {
-                    caching.CachingSemaphore.Release();
+                    await caching.Semaphore.WaitAsync();
+                    caching.Semaphore.Release();
                     return caching;
                 }
+
+                await data.Semaphore.WaitAsync();
             
                 using (var fs = AllocateTemporaryFile(factory, out var path))
                 {
                     await factory.Factory(fs);
-                
-                    CheckCaches();
                     
                     data.Path = path;
                     data.Size = fs.Length;
@@ -132,20 +121,36 @@ namespace Ks.Cacher
                     TotalSize += fs.Length;
                     TotalCount++;
                 }
-            
+
+                lock (lockObj)
+                {
+                    Cachings.Remove(key);
+
+                    if (Caches.ContainsKey(key))
+                    {
+                        var c = Caches[key];
+                        File.Delete(c.Path);
+                        TotalSize -= c.Size;
+                        TotalCount--;
+                    }
+
+                    Caches[key] = data;
+                }
+
+                CheckCaches();
+
                 return data;
             }
             finally
             {
                 if (!lockData) data.Unlock();
-                data.CachingSemaphore.Release();
+                data.Semaphore.Release();
                 Cached?.Invoke(this, new CachedEventArgs(data));
             }
         }
 
         public async Task CopyAsync(CachedData data, string export)
         {
-            await data.CachingSemaphore.WaitAsync();
             data.Lock();
             
             try
@@ -158,14 +163,13 @@ namespace Ks.Cacher
             }
             finally
             {
-                data.CachingSemaphore.Release();
                 data.Unlock();
             }
         }
 
         public void CheckCaches()
         {
-            lock (Caches)
+            lock (lockObj)
             {
                 try
                 {
