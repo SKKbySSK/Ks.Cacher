@@ -15,9 +15,11 @@ namespace Ks.Cacher
 
         private Dictionary<string, CachedData> Caches { get; } = new Dictionary<string, CachedData>();
 
-        private Dictionary<string, CachedData> Cachings { get; } = new Dictionary<string, CachedData>();
+        private Dictionary<string, CachedData> Caching { get; } = new Dictionary<string, CachedData>();
 
         public event EventHandler<CachedEventArgs> Cached;
+
+        public event EventHandler<CachedEventArgs> Removed;
 
         public FileManager(FileCacheConfig config, bool clear)
         {
@@ -50,19 +52,34 @@ namespace Ks.Cacher
         public FileCacheConfig Config { get; }
 
         /// <summary>
-        /// Get the <see cref="CachedData"/> from caches if it exists. Otherwise, create new cache.
+        /// Get the <see cref="CachedData"/> from caches if it exists. Otherwise, create new one.
         /// </summary>
         /// <param name="key"></param>
         /// <param name="factory"></param>
         /// <returns></returns>
         public async Task<CachedData> GetDataAsync(string key, CacheFactory factory, bool lockData)
         {
-            CachedData data;
+            var data = GetData(key, lockData);
+            
+            if(data == null)
+                data = await CacheAsync(key, factory, lockData).ConfigureAwait(false);
+            
+            return data;
+        }
+
+        /// <summary>
+        /// Get the <see cref="CachedData"/> from caches if it exists
+        /// </summary>
+        /// <param name="key"></param>
+        /// <param name="lockData"></param>
+        /// <returns></returns>
+        public CachedData GetData(string key, bool lockData)
+        {
             lock (lockObj)
             {
                 if (Caches.ContainsKey(key))
                 {
-                    data = Caches[key];
+                    var data = Caches[key];
 
                     if (lockData)
                         data.Lock();
@@ -71,8 +88,7 @@ namespace Ks.Cacher
                 }
             }
 
-            data = await CacheAsync(key, factory, lockData).ConfigureAwait(false);
-            return data;
+            return null;
         }
 
         /// <summary>
@@ -83,70 +99,87 @@ namespace Ks.Cacher
         /// <returns></returns>
         public async Task<CachedData> CacheAsync(string key, CacheFactory factory, bool lockData)
         {
-            CachedData data = new CachedData();
+            CachedData data = new CachedData(key);
+            await data.Semaphore.WaitAsync();
 
-            try
-            {
-                CachedData caching = null;
+            CachedData caching = null;
             
-                lock (lockObj)
-                {
-                    if (Cachings.ContainsKey(key))
-                    {
-                        caching = Cachings[key];
-                    }
-                    else
-                    {
-                        data.Lock();
-                        Cachings.Add(key, data);
-                    }
-                }
-
-                if (caching != null)
-                {
-                    await caching.Semaphore.WaitAsync();
-                    caching.Semaphore.Release();
-                    return caching;
-                }
-
-                await data.Semaphore.WaitAsync();
-            
-                using (var fs = AllocateTemporaryFile(factory, out var path))
-                {
-                    await factory.Factory(fs);
-                    
-                    data.Path = path;
-                    data.Size = fs.Length;
-                    
-                    TotalSize += fs.Length;
-                    TotalCount++;
-                }
-
-                lock (lockObj)
-                {
-                    Cachings.Remove(key);
-
-                    if (Caches.ContainsKey(key))
-                    {
-                        var c = Caches[key];
-                        File.Delete(c.Path);
-                        TotalSize -= c.Size;
-                        TotalCount--;
-                    }
-
-                    Caches[key] = data;
-                }
-
-                CheckCaches();
-
-                return data;
-            }
-            finally
+            lock (lockObj)
             {
-                if (!lockData) data.Unlock();
-                data.Semaphore.Release();
-                Cached?.Invoke(this, new CachedEventArgs(data));
+                if (Caching.ContainsKey(key))
+                {
+                    caching = Caching[key];
+                }
+                else
+                {
+                    data.Lock();
+                    Caching.Add(key, data);
+                }
             }
+
+            if (caching != null)
+            {
+                await caching.Semaphore.WaitAsync();
+                caching.Semaphore.Release();
+                return caching;
+            }
+
+            using (var fs = AllocateTemporaryFile(factory, out var path))
+            {
+                await factory.Factory(fs);
+                    
+                data.Path = path;
+                data.Size = fs.Length;
+                
+                TotalSize += fs.Length;
+                TotalCount++;
+            }
+
+            CachedData last = null;
+            
+            lock (lockObj)
+            {
+                Caching.Remove(key);
+
+                if (Caches.ContainsKey(key))
+                    last = Caches[key];
+
+                data.Disposed += DataOnDisposed;
+                Caches[key] = data;
+            }
+            
+            last?.Dispose();
+
+            CheckCaches();
+                
+            if (!lockData) data.Unlock();
+            data.Semaphore.Release();
+            
+            Cached?.Invoke(this, new CachedEventArgs(data));
+
+            return data;
+        }
+
+        private void DataOnDisposed(object sender, EventArgs e)
+        {
+            var data = (CachedData) sender;
+            data.Disposed -= DataOnDisposed;
+
+            lock (lockObj)
+            {
+                if (Caches.ContainsKey(data.Key))
+                {
+                    File.Delete(data.Path);
+                    TotalSize -= data.Size;
+                    TotalCount--;
+                    Caches.Remove(data.Key);
+
+                    data.Path = null;
+                    data.Key = null;
+                }
+            }
+            
+            Removed?.Invoke(this, new CachedEventArgs(data));
         }
 
         public async Task CopyAsync(CachedData data, string export)
@@ -169,9 +202,11 @@ namespace Ks.Cacher
 
         public void CheckCaches()
         {
-            lock (lockObj)
+            List<CachedData> dispose = new List<CachedData>();
+            
+            try
             {
-                try
+                lock (lockObj)
                 {
                     IEnumerable<KeyValuePair<string, CachedData>> order = Caches.OrderBy(pair => pair.Value.Size);
                     if (Config.RemovingPriority == CacheRemovingPriority.LargeFile) order = order.Reverse();
@@ -183,23 +218,22 @@ namespace Ks.Cacher
                         case CacheMode.Count:
                             var delta = TotalCount - Config.MaximumCount;
                             for (int i = 0; delta > i; i++)
-                            {
-                                var pair = rem[i];
-                                File.Delete(pair.Value.Path);
-                                TotalSize -= pair.Value.Size;
-                                TotalCount--;
-                                Caches.Remove(pair.Key);
-                            }
+                                dispose.Add(rem[i].Value);
                             break;
                         case CacheMode.Size:
                             Console.WriteLine("CacheMode.Size is currently unsupported");
                             break;
                     }
                 }
-                catch(Exception ex)
-                {
-                    Logger?.OnExceptionThrown(ex);
-                }
+            }
+            catch(Exception ex)
+            {
+                Logger?.OnExceptionThrown(ex);
+            }
+
+            foreach (var data in dispose)
+            {
+                data.Dispose();
             }
         }
 

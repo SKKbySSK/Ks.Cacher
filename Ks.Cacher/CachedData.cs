@@ -1,15 +1,21 @@
-﻿using System.IO;
+﻿using System;
+using System.IO;
+using System.IO.Compression;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Ks.Cacher
 {
-    public class CachedData
+    public sealed class CachedData : IDisposable
     {
-        internal CachedData()
+        internal CachedData(string key)
         {
-            
+            Key = key;
         }
+
+        internal event EventHandler Disposed;
+        
+        public string Key { get; internal set; }
         
         public string Path { get; internal set; }
 
@@ -42,75 +48,11 @@ namespace Ks.Cacher
             StreamLock = true;
             return new CachedStream(this);
         }
-    }
 
-    public class CachedStream : Stream
-    {
-        private FileStream BaseStream { get; set; }
-        
-        public CachedData Cache { get; private set; }
-        
-        internal CachedStream(CachedData cache)
+        public void Dispose()
         {
-            BaseStream = new FileStream(cache.Path, FileMode.Open, FileAccess.Read);
-            Cache = cache;
-        }
-
-        public override void Flush()
-        {
-            throw new System.NotSupportedException();
-        }
-
-        public override int Read(byte[] buffer, int offset, int count)
-        {
-            return BaseStream.Read(buffer, offset, count);
-        }
-
-        public override long Seek(long offset, SeekOrigin origin)
-        {
-            return BaseStream.Seek(offset, origin);
-        }
-
-        public override void SetLength(long value)
-        {
-            BaseStream.SetLength(value);
-        }
-
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            throw new System.NotSupportedException();
-        }
-
-        public override bool CanRead => BaseStream.CanRead;
-
-        public override bool CanSeek => BaseStream.CanSeek;
-
-        public override bool CanWrite => false;
-
-        public override long Length => BaseStream.Length;
-
-        public override long Position
-        {
-            get => BaseStream.Position;
-            set => BaseStream.Position = value;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            base.Dispose(disposing);
-
-            if (BaseStream != null)
-            {
-                BaseStream.Dispose();
-                BaseStream = null;
-            }
-
-            if (Cache != null)
-            {
-                Cache.StreamLock = false;
-                Cache.Semaphore.Release();
-                Cache = null;
-            }
+            Semaphore?.Dispose();
+            Disposed?.Invoke(this, EventArgs.Empty);
         }
     }
 }
